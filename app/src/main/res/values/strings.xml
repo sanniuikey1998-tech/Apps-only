@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">DeckLink</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_mouse">Mouse</string>
+    <string name="nav_keyboard">Keyboard</string>
+    <string name="nav_media">Media</string>
+    <string name="nav_shortcuts">Shortcuts</string>
+    <string name="nav_settings">Settings</string>
+
+    <string name="status_connected">Connected</string>
+    <string name="status_connecting">Connecting</string>
+    <string name="status_ready">HID Ready</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="status_bt_off">Bluetooth Off</string>
+    <string name="status_permissions_needed">Permissions Required</string>
+    <string name="status_unsupported">HID Unsupported</string>
+
+    <string name="cd_hero_banner">Spatial wireless laptop illustration</string>
+    <string name="cd_connect_button">Connect or disconnect PC</string>
+    <string name="cd_touchpad_area">Wireless mouse touchpad surface</string>
+</resources>

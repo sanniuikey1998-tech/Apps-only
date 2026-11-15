@@ -1,0 +1,6 @@
+{
+  "name": "DeckLink",
+  "description": "Zero-install wireless Bluetooth HID mouse, keyboard, media, and Windows 11 PC remote controller.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
