@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.ControlCamera
 import androidx.compose.material.icons.rounded.CoPresent
 import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.Keyboard
@@ -35,6 +36,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
@@ -60,6 +62,7 @@ import com.example.R
 import com.example.domain.hid.HidKeyCodes
 import com.example.domain.model.AppPreferences
 import com.example.domain.model.HidStatusState
+import com.example.domain.model.WifiConnectionPhase
 import com.example.ui.components.ConnectionStatusBadge
 import com.example.ui.components.GlassPanel
 import com.example.ui.components.performOptionalHaptic
@@ -103,7 +106,14 @@ fun MouseTouchpadScreen(
     onNaturalScrollChange: (Boolean) -> Unit,
     onOpenKeyboard: () -> Unit,
     onOpenPresentation: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiRemotePhase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED,
+    airMouseActive: Boolean = false,
+    isAirMouseSupported: Boolean = true,
+    onToggleAirMouse: () -> Unit = {},
+    onSetAirMouseHeld: (Boolean) -> Unit = {},
+    onAirMouseSensitivityChange: (Float) -> Unit = {},
+    onPinchZoom: (Int) -> Unit = {}
 ) {
     val haptics = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
@@ -111,6 +121,11 @@ fun MouseTouchpadScreen(
     var gestureBanner by remember { mutableStateOf("Touchpad Ready · 1–4 Finger Gestures") }
     var lastTapTimeMs by remember { mutableLongStateOf(0L) }
     val activeTouches = remember { mutableStateListOf<Offset>() }
+    var momentumJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(Unit) {
+        onDispose { momentumJob?.cancel() }
+    }
 
     Box(
         modifier = modifier
@@ -135,7 +150,7 @@ fun MouseTouchpadScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    ConnectionStatusBadge(phase = hidStatus.phase)
+                    ConnectionStatusBadge(phase = hidStatus.phase, wifiPhase = wifiRemotePhase)
                     Text(
                         text = hidStatus.connectedDeviceName ?: "Touchpad",
                         style = MaterialTheme.typography.titleMedium,
@@ -146,6 +161,30 @@ fun MouseTouchpadScreen(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (isAirMouseSupported) {
+                        FilterChip(
+                            selected = airMouseActive,
+                            onClick = {
+                                performOptionalHaptic(haptics, preferences.hapticFeedback, strong = true)
+                                onToggleAirMouse()
+                            },
+                            label = { Text("Air", maxLines = 1) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Rounded.ControlCamera,
+                                    contentDescription = "Toggle Air Mouse",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LuminousViolet.copy(alpha = 0.28f),
+                                selectedLabelColor = LuminousVioletBright,
+                                selectedLeadingIconColor = LuminousVioletBright
+                            ),
+                            modifier = Modifier.testTag("mouse_air_mouse_chip")
+                        )
+                    }
+
                     FilterChip(
                         selected = dragLockEnabled,
                         onClick = {
@@ -234,6 +273,18 @@ fun MouseTouchpadScreen(
                         onValueChange = onSensitivityChange,
                         valueRange = 0.5f..2.5f
                     )
+                    if (isAirMouseSupported) {
+                        Text(
+                            text = "Air Mouse Sensitivity: ${"%.2f".format(preferences.airMouseSensitivity)}x",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = LuminousVioletBright
+                        )
+                        Slider(
+                            value = preferences.airMouseSensitivity,
+                            onValueChange = onAirMouseSensitivityChange,
+                            valueRange = 0.5f..2.5f
+                        )
+                    }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -286,6 +337,7 @@ fun MouseTouchpadScreen(
                                 val firstDownEvent = awaitPointerEvent()
                                 val firstDown = firstDownEvent.changes.firstOrNull { it.pressed } ?: continue
                                 firstDown.consume()
+                                momentumJob?.cancel()
                                 onResetMath()
 
                                 val downTime = System.currentTimeMillis()
@@ -297,6 +349,12 @@ fun MouseTouchpadScreen(
                                 var multiFingerNetDx = 0f
                                 var multiFingerNetDy = 0f
                                 var multiGestureFired = false
+                                var pinchAccumulator = 0f
+                                var lastTwoFingerSpan = 0f
+                                var scrollVelX = 0f
+                                var scrollVelY = 0f
+                                var didTwoFingerScroll = false
+                                var didPinch = false
                                 var primaryId: PointerId = firstDown.id
                                 var lastPrimaryPos: Offset = firstDown.position
 
@@ -364,11 +422,33 @@ fun MouseTouchpadScreen(
 
                                         2 -> {
                                             longPressJob.cancel()
-                                            val avgDx = pressedChanges.map { it.position.x - it.previousPosition.x }.average().toFloat()
-                                            val avgDy = pressedChanges.map { it.position.y - it.previousPosition.y }.average().toFloat()
-                                            val dist = hypot(avgDx, avgDy)
-                                            totalMovement += dist
-                                            if (dist > 0.4f) {
+                                            val p0 = pressedChanges[0].position
+                                            val p1 = pressedChanges[1].position
+                                            val prev0 = pressedChanges[0].previousPosition
+                                            val prev1 = pressedChanges[1].previousPosition
+                                            val currentSpan = hypot(p1.x - p0.x, p1.y - p0.y)
+                                            val prevSpan = hypot(prev1.x - prev0.x, prev1.y - prev0.y)
+                                            val spanDelta = if (lastTwoFingerSpan > 0f) currentSpan - prevSpan else 0f
+                                            lastTwoFingerSpan = currentSpan
+
+                                            val avgDx = ((p0.x - prev0.x) + (p1.x - prev1.x)) * 0.5f
+                                            val avgDy = ((p0.y - prev0.y) + (p1.y - prev1.y)) * 0.5f
+                                            val panDist = hypot(avgDx, avgDy)
+                                            totalMovement += panDist + abs(spanDelta) * 0.5f
+
+                                            if (abs(spanDelta) > panDist * 1.15f && abs(spanDelta) > 1.5f) {
+                                                didPinch = true
+                                                pinchAccumulator += spanDelta
+                                                while (abs(pinchAccumulator) >= 28f) {
+                                                    val step = if (pinchAccumulator > 0f) 1 else -1
+                                                    pinchAccumulator -= step * 28f
+                                                    gestureBanner = if (step > 0) "Pinch · Zoom In" else "Pinch · Zoom Out"
+                                                    onPinchZoom(step)
+                                                }
+                                            } else if (panDist > 0.4f) {
+                                                didTwoFingerScroll = true
+                                                scrollVelX = scrollVelX * 0.45f + avgDx * 0.55f
+                                                scrollVelY = scrollVelY * 0.45f + avgDy * 0.55f
                                                 gestureBanner = "2-Finger Scroll (V / H)"
                                                 onScrollTwoFinger(avgDx, avgDy)
                                             }
@@ -405,13 +485,27 @@ fun MouseTouchpadScreen(
                                     event.changes.forEach { it.consume() }
                                 }
 
-                                // All fingers released — evaluate tap actions
+                                // All fingers released — evaluate tap actions or inertial scroll fling
                                 val durationMs = System.currentTimeMillis() - downTime
                                 if (isDoubleTapDragging) {
                                     onSetDragMode(false)
                                     gestureBanner = "Dropped"
                                     lastTapTimeMs = 0L
-                                } else if (!longPressTriggered && !multiGestureFired && totalMovement < 20f && durationMs < 320L) {
+                                } else if (didTwoFingerScroll && !didPinch && hypot(scrollVelX, scrollVelY) > 6f) {
+                                    val launchVx = scrollVelX.coerceIn(-48f, 48f)
+                                    val launchVy = scrollVelY.coerceIn(-48f, 48f)
+                                    momentumJob = scope.launch {
+                                        var vx = launchVx
+                                        var vy = launchVy
+                                        repeat(28) {
+                                            delay(16L)
+                                            vx *= 0.86f
+                                            vy *= 0.86f
+                                            if (hypot(vx, vy) < 1.2f) return@launch
+                                            onScrollTwoFinger(vx, vy)
+                                        }
+                                    }
+                                } else if (!longPressTriggered && !multiGestureFired && !didPinch && totalMovement < 20f && durationMs < 320L) {
                                     when (maxPointers) {
                                         1 -> {
                                             val now = System.currentTimeMillis()
@@ -500,12 +594,34 @@ fun MouseTouchpadScreen(
                 }
 
                 Text(
-                    text = "Tap: Left · 2-Tap: Right · 2-Drag: Scroll V/H · Long-Press: Context · 3/4-Finger Swipes",
+                    text = if (airMouseActive) {
+                        "Air Mouse Active · Tilt or sweep phone to aim cursor"
+                    } else {
+                        "Tap: Left · 2-Tap: Right · 2-Drag: Momentum Scroll · Pinch: Zoom · 3/4-Finger Swipes"
+                    },
                     style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
+                    color = if (airMouseActive) LuminousVioletBright else TextMuted,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+
+            // Hold-to-Aim Air Mouse Strip
+            if (isAirMouseSupported) {
+                HoldableMouseButton(
+                    label = if (airMouseActive) "Air Mouse Active (Tap chip to stop)" else "Hold to Aim · Gyro Air Mouse",
+                    accentColor = LuminousViolet,
+                    hapticsEnabled = preferences.hapticFeedback,
+                    onHoldChanged = { held ->
+                        if (!airMouseActive || !held) {
+                            onSetAirMouseHeld(held)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("mouse_air_hold_strip")
                 )
             }
 

@@ -18,4 +18,13 @@
     <string name="cd_hero_banner">Spatial wireless laptop illustration</string>
     <string name="cd_connect_button">Connect or disconnect PC</string>
     <string name="cd_touchpad_area">Wireless mouse touchpad surface</string>
+
+    <string name="quick_tile_label">DeckLink PC</string>
+    <string name="widget_title">DeckLink PC Remote</string>
+    <string name="widget_open_label">OPEN</string>
+    <string name="widget_description">Quick media, mute, hotspot listener, and lock PC controls</string>
+    <string name="widget_action_play">Play</string>
+    <string name="widget_action_mute">Mute</string>
+    <string name="widget_action_hotspot">Hotspot</string>
+    <string name="widget_action_lock">Lock</string>
 </resources>

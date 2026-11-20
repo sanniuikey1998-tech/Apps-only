@@ -29,22 +29,28 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ClosedCaption
 import androidx.compose.material.icons.rounded.Contrast
+import androidx.compose.material.icons.rounded.ControlCamera
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Flare
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlayCircleFilled
 import androidx.compose.material.icons.rounded.PresentToAll
+import androidx.compose.material.icons.rounded.RestartAlt
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -69,6 +75,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.domain.hid.HidKeyCodes
 import com.example.domain.model.HidStatusState
+import com.example.domain.model.PresentationTimerState
+import com.example.domain.model.WifiConnectionPhase
 import com.example.ui.components.ConnectionStatusBadge
 import com.example.ui.components.GlassActionTile
 import com.example.ui.components.GlassPanel
@@ -86,6 +94,7 @@ import com.example.ui.theme.RoseAlert
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
+import kotlin.math.abs
 import kotlin.math.hypot
 
 @Composable
@@ -99,11 +108,23 @@ fun MediaPresentationScreen(
     onToggleLaserPointer: () -> Unit,
     onMovePointer: (Float, Float) -> Unit,
     onLeftClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiRemotePhase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED,
+    presentationTimer: PresentationTimerState = PresentationTimerState(),
+    airMouseActive: Boolean = false,
+    isAirMouseSupported: Boolean = true,
+    onToggleAirMouse: () -> Unit = {},
+    onToggleTimer: () -> Unit = {},
+    onResetTimer: () -> Unit = {},
+    onSetTimerMinutes: (Int) -> Unit = {},
+    onSelectedTabChanged: (Int) -> Unit = {}
 ) {
     var selectedTab by remember { mutableIntStateOf(initialTab.coerceIn(0, 1)) }
     LaunchedEffect(initialTab) {
         selectedTab = initialTab.coerceIn(0, 1)
+    }
+    LaunchedEffect(selectedTab) {
+        onSelectedTabChanged(selectedTab)
     }
 
     Box(
@@ -128,7 +149,7 @@ fun MediaPresentationScreen(
                         style = MaterialTheme.typography.headlineMedium,
                         color = TextPrimary
                     )
-                    ConnectionStatusBadge(phase = hidStatus.phase)
+                    ConnectionStatusBadge(phase = hidStatus.phase, wifiPhase = wifiRemotePhase)
                 }
             }
 
@@ -160,9 +181,16 @@ fun MediaPresentationScreen(
                 item {
                     PresentationRemoteContent(
                         laserPointerActive = laserPointerActive,
+                        airMouseActive = airMouseActive,
+                        isAirMouseSupported = isAirMouseSupported,
+                        presentationTimer = presentationTimer,
                         hapticsEnabled = hapticsEnabled,
                         onPresentationAction = onPresentationAction,
                         onToggleLaserPointer = onToggleLaserPointer,
+                        onToggleAirMouse = onToggleAirMouse,
+                        onToggleTimer = onToggleTimer,
+                        onResetTimer = onResetTimer,
+                        onSetTimerMinutes = onSetTimerMinutes,
                         onMovePointer = onMovePointer,
                         onLeftClick = onLeftClick
                     )
@@ -434,15 +462,160 @@ private fun MediaRemoteContent(
 @Composable
 private fun PresentationRemoteContent(
     laserPointerActive: Boolean,
+    airMouseActive: Boolean,
+    isAirMouseSupported: Boolean,
+    presentationTimer: PresentationTimerState,
     hapticsEnabled: Boolean,
     onPresentationAction: (String) -> Unit,
     onToggleLaserPointer: () -> Unit,
+    onToggleAirMouse: () -> Unit,
+    onToggleTimer: () -> Unit,
+    onResetTimer: () -> Unit,
+    onSetTimerMinutes: (Int) -> Unit,
     onMovePointer: (Float, Float) -> Unit,
     onLeftClick: () -> Unit
 ) {
     val haptics = LocalHapticFeedback.current
+    val remaining = presentationTimer.remainingSec
+    val isOvertime = remaining < 0
+    val absSec = abs(remaining)
+    val timerText = "${if (isOvertime) "+" else ""}%02d:%02d".format(absSec / 60, absSec % 60)
+    val progress = if (presentationTimer.targetDurationSec > 0) {
+        (presentationTimer.elapsedSec.toFloat() / presentationTimer.targetDurationSec.toFloat()).coerceIn(0f, 1f)
+    } else 0f
 
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        // Presentation Timer & Slide Counter Card
+        GlassPanel(
+            elevated = true,
+            accentGlow = if (isOvertime) RoseAlert else ElectricBlue,
+            contentPadding = PaddingValues(14.dp),
+            modifier = Modifier.testTag("pres_timer_card")
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Timer,
+                        contentDescription = null,
+                        tint = if (isOvertime) RoseAlert else ElectricBlueBright,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Column {
+                        Text(
+                            text = timerText,
+                            style = MaterialTheme.typography.headlineSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = if (isOvertime) RoseAlert else TextPrimary
+                        )
+                        Text(
+                            text = presentationTimer.lastMilestoneAlert
+                                ?: "Use phone Vol+/Vol- buttons for Next/Prev slide",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isOvertime) RoseAlert else TextSecondary
+                        )
+                    }
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(LuminousViolet.copy(alpha = 0.22f))
+                        .border(1.dp, LuminousViolet.copy(alpha = 0.5f), RoundedCornerShape(10.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "Slide #${presentationTimer.slideNumber}",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = LuminousVioletBright
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+            LinearProgressIndicator(
+                progress = { progress },
+                color = if (isOvertime) RoseAlert else ElectricBlue,
+                trackColor = GlassSurfaceElevated,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(6.dp)
+                    .clip(CircleShape)
+            )
+
+            Spacer(modifier = Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                listOf(5, 10, 15, 20).forEach { mins ->
+                    val selected = presentationTimer.targetDurationSec == mins * 60
+                    FilterChip(
+                        selected = selected,
+                        onClick = {
+                            performOptionalHaptic(haptics, hapticsEnabled)
+                            onSetTimerMinutes(mins)
+                        },
+                        label = { Text("${mins}m", maxLines = 1) },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = ElectricBlue.copy(alpha = 0.24f),
+                            selectedLabelColor = ElectricBlueBright
+                        ),
+                        modifier = Modifier.testTag("pres_timer_preset_$mins")
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        performOptionalHaptic(haptics, hapticsEnabled)
+                        onToggleTimer()
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (presentationTimer.isRunning) LuminousViolet else ElectricBlue
+                    ),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("pres_timer_toggle")
+                ) {
+                    Icon(
+                        imageVector = if (presentationTimer.isRunning) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(if (presentationTimer.isRunning) "Pause Timer" else "Start Timer")
+                }
+                OutlinedButton(
+                    onClick = {
+                        performOptionalHaptic(haptics, hapticsEnabled)
+                        onResetTimer()
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .height(48.dp)
+                        .testTag("pres_timer_reset")
+                ) {
+                    Icon(Icons.Rounded.RestartAlt, contentDescription = "Reset timer", modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Reset")
+                }
+            }
+        }
+
         // Large Ergonomic Prev / Next Slide Paddles
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -586,23 +759,44 @@ private fun PresentationRemoteContent(
                         color = TextSecondary
                     )
                 }
-                FilterChip(
-                    selected = laserPointerActive,
-                    onClick = {
-                        performOptionalHaptic(haptics, hapticsEnabled, strong = true)
-                        onToggleLaserPointer()
-                    },
-                    label = { Text("Laser", maxLines = 1) },
-                    leadingIcon = {
-                        Icon(Icons.Rounded.Flare, contentDescription = null, modifier = Modifier.size(16.dp))
-                    },
-                    colors = FilterChipDefaults.filterChipColors(
-                        selectedContainerColor = RoseAlert.copy(alpha = 0.25f),
-                        selectedLabelColor = RoseAlert,
-                        selectedLeadingIconColor = RoseAlert
-                    ),
-                    modifier = Modifier.testTag("pres_laser_toggle")
-                )
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (isAirMouseSupported) {
+                        FilterChip(
+                            selected = airMouseActive,
+                            onClick = {
+                                performOptionalHaptic(haptics, hapticsEnabled, strong = true)
+                                onToggleAirMouse()
+                            },
+                            label = { Text("Air", maxLines = 1) },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.ControlCamera, contentDescription = null, modifier = Modifier.size(16.dp))
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = LuminousViolet.copy(alpha = 0.25f),
+                                selectedLabelColor = LuminousVioletBright,
+                                selectedLeadingIconColor = LuminousVioletBright
+                            ),
+                            modifier = Modifier.testTag("pres_air_mouse_toggle")
+                        )
+                    }
+                    FilterChip(
+                        selected = laserPointerActive,
+                        onClick = {
+                            performOptionalHaptic(haptics, hapticsEnabled, strong = true)
+                            onToggleLaserPointer()
+                        },
+                        label = { Text("Laser", maxLines = 1) },
+                        leadingIcon = {
+                            Icon(Icons.Rounded.Flare, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = RoseAlert.copy(alpha = 0.25f),
+                            selectedLabelColor = RoseAlert,
+                            selectedLeadingIconColor = RoseAlert
+                        ),
+                        modifier = Modifier.testTag("pres_laser_toggle")
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(10.dp))

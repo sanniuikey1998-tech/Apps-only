@@ -33,11 +33,15 @@ import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.BluetoothConnected
 import androidx.compose.material.icons.rounded.CoPresent
 import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.DashboardCustomize
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.LaptopWindows
 import androidx.compose.material.icons.rounded.LinkOff
 import androidx.compose.material.icons.rounded.Mouse
+import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.PlayCircleOutline
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Wifi
@@ -48,8 +52,12 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -68,10 +76,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.domain.model.BatteryStatusInfo
+import com.example.domain.model.FileTransferState
 import com.example.domain.model.HidConnectionPhase
 import com.example.domain.model.HidStatusState
 import com.example.domain.model.PairedPcDevice
 import com.example.domain.model.PermissionSummary
+import com.example.domain.model.RemoteTransportMode
+import com.example.domain.model.WifiConnectionDirection
+import com.example.domain.model.WifiConnectionPhase
+import com.example.domain.model.WifiRemoteStatus
 import com.example.domain.model.WifiStatusInfo
 import com.example.ui.components.ConnectionStatusBadge
 import com.example.ui.components.GlassActionTile
@@ -103,10 +116,24 @@ fun HomeDashboardScreen(
     onRequestPermissions: () -> Unit,
     onOpenMode: (String) -> Unit,
     onOpenConnectionSettings: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiRemoteStatus: WifiRemoteStatus = WifiRemoteStatus(),
+    preferredTransport: RemoteTransportMode = RemoteTransportMode.BLUETOOTH_HID,
+    wifiDirection: WifiConnectionDirection = WifiConnectionDirection.PC_TO_PHONE_HOTSPOT,
+    savedWifiTargetIp: String = "",
+    onSelectTransport: (RemoteTransportMode) -> Unit = {},
+    fileTransferState: FileTransferState = FileTransferState(),
+    onPushClipboard: () -> Unit = {},
+    onPullClipboard: () -> Unit = {},
+    onPickPhotoDrop: () -> Unit = {},
+    onPickDocDrop: () -> Unit = {}
 ) {
     val context = LocalContext.current
-    val isConnected = hidStatus.phase == HidConnectionPhase.CONNECTED
+    val isBtConnected = hidStatus.phase == HidConnectionPhase.CONNECTED
+    val isWifiRemoteConnected = wifiRemoteStatus.phase == WifiConnectionPhase.CONNECTED
+    val isWifiListening = wifiRemoteStatus.phase == WifiConnectionPhase.LISTENING
+    val showWifiHero = preferredTransport == RemoteTransportMode.WIFI_POWERSHELL ||
+        (!isBtConnected && (isWifiRemoteConnected || isWifiListening))
 
     Box(
         modifier = modifier.fillMaxSize(),
@@ -133,20 +160,21 @@ fun HomeDashboardScreen(
                             color = TextPrimary
                         )
                         Text(
-                            text = "Zero-Install Windows HID Controller",
+                            text = "Bluetooth HID (Zero-Setup) & Wi-Fi Receiver",
                             style = MaterialTheme.typography.bodySmall,
                             color = TextSecondary
                         )
                     }
                     ConnectionStatusBadge(
                         phase = hidStatus.phase,
+                        wifiPhase = wifiRemoteStatus.phase,
                         modifier = Modifier.testTag("dashboard_status_badge")
                     )
                 }
             }
 
-            // 2. Permission / Bluetooth Off Action Banner if needed
-            if (!permissions.allBluetoothGranted || hidStatus.phase == HidConnectionPhase.BLUETOOTH_OFF) {
+            // 2. Permission / Bluetooth Off Action Banner if needed (shown in Bluetooth mode)
+            if (!showWifiHero && (!permissions.allBluetoothGranted || hidStatus.phase == HidConnectionPhase.BLUETOOTH_OFF)) {
                 item {
                     GlassPanel(
                         accentGlow = AmberWarning,
@@ -244,10 +272,36 @@ fun HomeDashboardScreen(
 
                     GlassPanel(
                         shape = RoundedCornerShape(28.dp),
-                        accentGlow = if (isConnected) EmeraldConnected else ElectricBlue,
+                        accentGlow = when {
+                            isBtConnected -> EmeraldConnected
+                            isWifiRemoteConnected -> CyanIce
+                            else -> ElectricBlue
+                        },
                         contentPadding = PaddingValues(18.dp),
                         modifier = Modifier.fillMaxWidth()
                     ) {
+                        // Transport Selector: Strict Zero-Install BT HID vs Local Wi-Fi PowerShell Receiver
+                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                            SegmentedButton(
+                                selected = preferredTransport == RemoteTransportMode.BLUETOOTH_HID,
+                                onClick = { onSelectTransport(RemoteTransportMode.BLUETOOTH_HID) },
+                                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                                modifier = Modifier.testTag("transport_mode_bt")
+                            ) {
+                                Text("Bluetooth HID", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            SegmentedButton(
+                                selected = preferredTransport == RemoteTransportMode.WIFI_POWERSHELL,
+                                onClick = { onSelectTransport(RemoteTransportMode.WIFI_POWERSHELL) },
+                                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                                modifier = Modifier.testTag("transport_mode_wifi")
+                            ) {
+                                Text("Wi-Fi Receiver", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(14.dp))
+
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -257,41 +311,71 @@ fun HomeDashboardScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.weight(1f)
                             ) {
+                                val heroIcon = when {
+                                    showWifiHero && isWifiRemoteConnected -> Icons.Rounded.Wifi
+                                    showWifiHero -> Icons.Rounded.Wifi
+                                    isBtConnected -> Icons.Rounded.BluetoothConnected
+                                    else -> Icons.Rounded.LaptopWindows
+                                }
+                                val heroTint = when {
+                                    isBtConnected && !showWifiHero -> EmeraldConnected
+                                    isWifiRemoteConnected && showWifiHero -> CyanIce
+                                    else -> ElectricBlueBright
+                                }
                                 Box(
                                     modifier = Modifier
                                         .size(46.dp)
                                         .clip(CircleShape)
-                                        .background(
-                                            if (isConnected) EmeraldConnected.copy(alpha = 0.22f)
-                                            else ElectricBlue.copy(alpha = 0.22f)
-                                        ),
+                                        .background(heroTint.copy(alpha = 0.20f)),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
-                                        imageVector = if (isConnected) {
-                                            Icons.Rounded.BluetoothConnected
-                                        } else {
-                                            Icons.Rounded.LaptopWindows
-                                        },
+                                        imageVector = heroIcon,
                                         contentDescription = "PC link icon",
-                                        tint = if (isConnected) EmeraldConnected else ElectricBlueBright,
+                                        tint = heroTint,
                                         modifier = Modifier.size(24.dp)
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(12.dp))
                                 Column {
                                     Text(
-                                        text = hidStatus.connectedDeviceName ?: "No PC Connected",
+                                        text = if (showWifiHero) {
+                                            wifiRemoteStatus.remoteHostname ?: if (wifiDirection == WifiConnectionDirection.PC_TO_PHONE_HOTSPOT) {
+                                                wifiStatus.hotspotIpv4?.let { "Hotspot ($it)" } ?: "Outdoor Hotspot Mode"
+                                            } else {
+                                                savedWifiTargetIp.ifBlank { "Wi-Fi PowerShell Mode" }
+                                            }
+                                        } else {
+                                            hidStatus.connectedDeviceName ?: "No PC Connected"
+                                        },
                                         style = MaterialTheme.typography.titleLarge,
                                         color = TextPrimary,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Text(
-                                        text = if (isConnected) {
-                                            "Bluetooth HID Composite · ${hidStatus.connectedDeviceAddress.orEmpty()}"
+                                        text = if (showWifiHero) {
+                                            if (isWifiRemoteConnected) {
+                                                val rtt = wifiRemoteStatus.latencyMs?.let { " · ${it}ms" }.orEmpty()
+                                                val modeTag = if (wifiRemoteStatus.direction == WifiConnectionDirection.PC_TO_PHONE_HOTSPOT) {
+                                                    "Phone Hotspot"
+                                                } else {
+                                                    "Local Wi-Fi"
+                                                }
+                                                "$modeTag · ${wifiRemoteStatus.hostIp}:${wifiRemoteStatus.port}$rtt"
+                                            } else if (wifiDirection == WifiConnectionDirection.PC_TO_PHONE_HOTSPOT &&
+                                                wifiRemoteStatus.phase == WifiConnectionPhase.DISCONNECTED
+                                            ) {
+                                                "PC connects outbound to your Phone Hotspot · No PC IP needed"
+                                            } else {
+                                                wifiRemoteStatus.statusMessage
+                                            }
                                         } else {
-                                            hidStatus.statusMessage
+                                            if (isBtConnected) {
+                                                "Bluetooth HID (Zero-Setup) · ${hidStatus.connectedDeviceAddress.orEmpty()}"
+                                            } else {
+                                                hidStatus.statusMessage
+                                            }
                                         },
                                         style = MaterialTheme.typography.bodySmall,
                                         color = TextSecondary,
@@ -308,10 +392,27 @@ fun HomeDashboardScreen(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
+                            val primaryActionIsDisconnect = if (showWifiHero) {
+                                isWifiRemoteConnected || isWifiListening
+                            } else {
+                                isBtConnected
+                            }
+                            val needsWifiSetup = showWifiHero &&
+                                !isWifiRemoteConnected &&
+                                !isWifiListening &&
+                                wifiDirection == WifiConnectionDirection.PHONE_TO_PC &&
+                                savedWifiTargetIp.isBlank()
                             Button(
-                                onClick = onQuickConnectClick,
+                                onClick = {
+                                    if (needsWifiSetup) onOpenConnectionSettings()
+                                    else onQuickConnectClick()
+                                },
                                 colors = ButtonDefaults.buttonColors(
-                                    containerColor = if (isConnected) RoseAlert else ElectricBlue
+                                    containerColor = when {
+                                        primaryActionIsDisconnect -> RoseAlert
+                                        showWifiHero -> LuminousViolet
+                                        else -> ElectricBlue
+                                    }
                                 ),
                                 shape = RoundedCornerShape(16.dp),
                                 modifier = Modifier
@@ -320,14 +421,25 @@ fun HomeDashboardScreen(
                                     .testTag("quick_connect_button")
                             ) {
                                 Icon(
-                                    imageVector = if (isConnected) Icons.Rounded.LinkOff else Icons.AutoMirrored.Rounded.BluetoothSearching,
+                                    imageVector = when {
+                                        primaryActionIsDisconnect -> Icons.Rounded.LinkOff
+                                        showWifiHero -> Icons.Rounded.Wifi
+                                        else -> Icons.AutoMirrored.Rounded.BluetoothSearching
+                                    },
                                     contentDescription = stringResource(R.string.cd_connect_button),
                                     modifier = Modifier.size(18.dp)
                                 )
                                 Spacer(modifier = Modifier.width(8.dp))
                                 Text(
                                     text = when {
-                                        isConnected -> "Disconnect"
+                                        isWifiRemoteConnected && showWifiHero -> "Disconnect"
+                                        showWifiHero && isWifiListening -> "Stop Listener"
+                                        primaryActionIsDisconnect -> "Disconnect"
+                                        showWifiHero && wifiRemoteStatus.phase == WifiConnectionPhase.CONNECTING -> "Connecting..."
+                                        showWifiHero && wifiRemoteStatus.phase == WifiConnectionPhase.AUTHENTICATING -> "Authenticating..."
+                                        needsWifiSetup -> "Setup Wi-Fi"
+                                        showWifiHero && wifiDirection == WifiConnectionDirection.PC_TO_PHONE_HOTSPOT -> "Start Hotspot"
+                                        showWifiHero -> "Connect Wi-Fi"
                                         hidStatus.phase == HidConnectionPhase.CONNECTING -> "Connecting..."
                                         pairedDevices.isNotEmpty() -> "Quick Connect"
                                         else -> "Pair a PC"
@@ -366,18 +478,32 @@ fun HomeDashboardScreen(
                             hidStatus.isHidAppRegistered -> "HID Ready"
                             else -> "Idle"
                         },
-                        tint = if (isConnected) EmeraldConnected else ElectricBlueBright,
+                        tint = if (isBtConnected) EmeraldConnected else ElectricBlueBright,
                         modifier = Modifier.weight(1f)
                     )
                     TelemetryMiniCard(
-                        icon = if (wifiStatus.isWifiConnected) Icons.Rounded.Wifi else Icons.Rounded.WifiOff,
-                        label = "Wi-Fi LAN",
-                        value = if (wifiStatus.isWifiConnected) {
-                            wifiStatus.localIpv4 ?: "Connected"
+                        icon = if (wifiStatus.hasLocalNetwork || isWifiRemoteConnected || isWifiListening) {
+                            Icons.Rounded.Wifi
                         } else {
-                            "Offline"
+                            Icons.Rounded.WifiOff
                         },
-                        tint = if (wifiStatus.isWifiConnected) CyanIce else TextMuted,
+                        label = if (wifiStatus.isHotspotActive && !wifiStatus.isWifiConnected) {
+                            "Hotspot"
+                        } else {
+                            "Wi-Fi LAN"
+                        },
+                        value = when {
+                            isWifiRemoteConnected -> wifiRemoteStatus.latencyMs?.let { "${it}ms Live" } ?: "Receiver Live"
+                            isWifiListening -> wifiStatus.hotspotIpv4 ?: "Listening"
+                            wifiStatus.isWifiConnected -> wifiStatus.localIpv4 ?: "Connected"
+                            wifiStatus.isHotspotActive -> wifiStatus.hotspotIpv4 ?: "Active"
+                            else -> "Offline"
+                        },
+                        tint = when {
+                            isWifiRemoteConnected -> EmeraldConnected
+                            isWifiListening || wifiStatus.hasLocalNetwork -> CyanIce
+                            else -> TextMuted
+                        },
                         modifier = Modifier.weight(1f)
                     )
                     TelemetryMiniCard(
@@ -391,6 +517,98 @@ fun HomeDashboardScreen(
                         },
                         modifier = Modifier.weight(1f)
                     )
+                }
+            }
+
+            // 4b. Quick Clipboard Sync & File Drop Strip
+            item {
+                GlassPanel(contentPadding = PaddingValues(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Clipboard Sync & File Drop",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = if (isWifiRemoteConnected) "Wi-Fi Ready" else "BT Push / Wi-Fi Full",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (isWifiRemoteConnected) EmeraldConnected else TextMuted
+                        )
+                    }
+                    if (fileTransferState.isTransferring) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LinearProgressIndicator(
+                            progress = { fileTransferState.progressFraction.coerceIn(0f, 1f) },
+                            color = CyanIce,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilledTonalButton(
+                            onClick = onPushClipboard,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_push_clip_btn")
+                        ) {
+                            Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Push Clip", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        FilledTonalButton(
+                            onClick = onPullClipboard,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_pull_clip_btn")
+                        ) {
+                            Icon(Icons.Rounded.ContentPaste, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Pull PC", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = onPickPhotoDrop,
+                            enabled = !fileTransferState.isTransferring,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_drop_photo_btn")
+                        ) {
+                            Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Drop Photo", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        OutlinedButton(
+                            onClick = onPickDocDrop,
+                            enabled = !fileTransferState.isTransferring,
+                            contentPadding = PaddingValues(horizontal = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(48.dp)
+                                .testTag("home_drop_doc_btn")
+                        ) {
+                            Icon(Icons.Rounded.Description, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Drop File", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
             }
 

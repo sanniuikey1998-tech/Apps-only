@@ -3,6 +3,71 @@ package com.example.domain.model
 import com.example.domain.hid.CustomShortcut
 import com.example.domain.hid.FourFingerAction
 
+import com.example.domain.hid.WindowsVirtualKeyMapper
+
+enum class RemoteTransportMode {
+    BLUETOOTH_HID,
+    WIFI_POWERSHELL
+}
+
+enum class WifiConnectionDirection {
+    PHONE_TO_PC,
+    PC_TO_PHONE_HOTSPOT
+}
+
+enum class WifiConnectionPhase {
+    DISCONNECTED,
+    LISTENING,
+    CONNECTING,
+    AUTHENTICATING,
+    CONNECTED,
+    ERROR
+}
+
+data class WifiRemoteStatus(
+    val phase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED,
+    val direction: WifiConnectionDirection = WifiConnectionDirection.PHONE_TO_PC,
+    val hostIp: String? = null,
+    val port: Int = WindowsVirtualKeyMapper.DEFAULT_WIFI_PORT,
+    val remoteHostname: String? = null,
+    val latencyMs: Long? = null,
+    val statusMessage: String = "Local Wi-Fi PowerShell receiver idle"
+)
+
+data class ScriptServerStatus(
+    val isRunning: Boolean = false,
+    val port: Int = WindowsVirtualKeyMapper.DEFAULT_WIFI_PORT + 1,
+    val oneLinerCommand: String = "",
+    val remainingSeconds: Int = 0,
+    val serveCount: Int = 0,
+    val statusNote: String = ""
+)
+
+data class FileTransferState(
+    val isTransferring: Boolean = false,
+    val fileName: String = "",
+    val progressFraction: Float = 0f,
+    val lastResultMessage: String? = null
+)
+
+data class VoiceDictationState(
+    val isListening: Boolean = false,
+    val isAvailable: Boolean = true,
+    val partialTranscript: String = "",
+    val errorNote: String? = null
+)
+
+data class PresentationTimerState(
+    val targetDurationSec: Int = 600,
+    val elapsedSec: Int = 0,
+    val isRunning: Boolean = false,
+    val slideNumber: Int = 1,
+    val lastMilestoneAlert: String? = null
+) {
+    val remainingSec: Int
+        get() = targetDurationSec - elapsedSec
+}
+
 enum class HidConnectionPhase {
     HID_UNSUPPORTED,
     MISSING_PERMISSIONS,
@@ -58,8 +123,20 @@ data class WifiStatusInfo(
     val ssid: String? = null,
     val localIpv4: String? = null,
     val subnetPrefix: String? = null,
-    val linkSpeedMbps: Int? = null
-)
+    val linkSpeedMbps: Int? = null,
+    val isHotspotActive: Boolean = false,
+    val hotspotIpv4: String? = null,
+    val hotspotSubnetPrefix: String? = null
+) {
+    val hasLocalNetwork: Boolean
+        get() = isWifiConnected || isHotspotActive
+
+    val effectiveLocalIpv4: String?
+        get() = localIpv4 ?: hotspotIpv4
+
+    val effectiveSubnetPrefix: String?
+        get() = subnetPrefix ?: hotspotSubnetPrefix
+}
 
 data class BatteryStatusInfo(
     val levelPercent: Int = 100,
@@ -96,5 +173,12 @@ data class AppPreferences(
     val lastConnectedName: String? = null,
     val autoConnectAddresses: Set<String> = emptySet(),
     val disabledAutoConnectAddresses: Set<String> = emptySet(),
-    val customShortcuts: List<CustomShortcut> = emptyList()
+    val customShortcuts: List<CustomShortcut> = emptyList(),
+    val preferredTransport: RemoteTransportMode = RemoteTransportMode.BLUETOOTH_HID,
+    val wifiDirection: WifiConnectionDirection = WifiConnectionDirection.PC_TO_PHONE_HOTSPOT,
+    val wifiTargetIp: String = "",
+    val wifiPort: Int = WindowsVirtualKeyMapper.DEFAULT_WIFI_PORT,
+    val wifiPin: String = WindowsVirtualKeyMapper.DEFAULT_WIFI_PIN,
+    val airMouseSensitivity: Float = 1.25f,
+    val volumeButtonsControl: Boolean = true
 )

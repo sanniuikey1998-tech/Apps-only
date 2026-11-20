@@ -1,5 +1,11 @@
 package com.example.ui.screens
 
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.speech.RecognizerIntent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -31,6 +37,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardReturn
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.SpaceBar
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -63,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import com.example.domain.hid.CustomShortcut
 import com.example.domain.hid.HidKeyCodes
 import com.example.domain.model.HidStatusState
+import com.example.domain.model.WifiConnectionPhase
 import com.example.ui.components.ConnectionStatusBadge
 import com.example.ui.components.GlassPanel
 import com.example.ui.components.performOptionalHaptic
@@ -92,11 +100,28 @@ fun KeyboardScreen(
     onSendChar: (Char) -> Unit,
     onSendText: (String) -> Unit,
     onTriggerCustomShortcut: (CustomShortcut) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiRemotePhase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED,
+    onPushClipboard: () -> Unit = {},
+    onPullClipboard: () -> Unit = {}
 ) {
     val haptics = LocalHapticFeedback.current
     var textBuffer by remember { mutableStateOf("") }
+    var voiceNotice by remember { mutableStateOf<String?>(null) }
     var selectedLayout by remember { mutableIntStateOf(0) } // 0 = QWERTY, 1 = 123 & Sym, 2 = Fn & Nav
+
+    val voiceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val matches = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+            val spoken = matches?.firstOrNull()?.trim()
+            if (!spoken.isNullOrEmpty()) {
+                voiceNotice = "Sent voice: \"$spoken\""
+                onSendText(spoken)
+            }
+        }
+    }
 
     val isShifted = ((latchedModifiers or lockedModifiers) and HidKeyCodes.MOD_LEFT_SHIFT) != 0
 
@@ -123,7 +148,7 @@ fun KeyboardScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        ConnectionStatusBadge(phase = hidStatus.phase)
+                        ConnectionStatusBadge(phase = hidStatus.phase, wifiPhase = wifiRemotePhase)
                         Text(
                             text = "Wireless Keyboard",
                             style = MaterialTheme.typography.titleMedium,
@@ -180,6 +205,33 @@ fun KeyboardScreen(
                         FilledIconButton(
                             onClick = {
                                 performOptionalHaptic(haptics, hapticsEnabled)
+                                val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                                    putExtra(
+                                        RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                                        RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+                                    )
+                                    putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak to type on Windows PC")
+                                }
+                                try {
+                                    voiceNotice = null
+                                    voiceLauncher.launch(intent)
+                                } catch (_: ActivityNotFoundException) {
+                                    voiceNotice = "Speech recognition service unavailable on this device."
+                                }
+                            },
+                            colors = IconButtonDefaults.filledIconButtonColors(containerColor = LuminousViolet),
+                            modifier = Modifier
+                                .size(48.dp)
+                                .testTag("keyboard_voice_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Mic,
+                                contentDescription = "Voice-to-PC dictation"
+                            )
+                        }
+                        FilledIconButton(
+                            onClick = {
+                                performOptionalHaptic(haptics, hapticsEnabled)
                                 if (textBuffer.isNotEmpty()) {
                                     onSendText(textBuffer)
                                     textBuffer = ""
@@ -195,6 +247,16 @@ fun KeyboardScreen(
                                 contentDescription = "Send text to PC"
                             )
                         }
+                    }
+                    if (voiceNotice != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = voiceNotice ?: "",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = LuminousVioletBright,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -250,6 +312,18 @@ fun KeyboardScreen(
                             .horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
+                        KeyCapChip(
+                            label = "Push Clip → PC",
+                            hapticsEnabled = hapticsEnabled,
+                            accent = EmeraldConnected,
+                            modifier = Modifier.testTag("keyboard_push_clip_btn")
+                        ) { onPushClipboard() }
+                        KeyCapChip(
+                            label = "Pull PC → Phone",
+                            hapticsEnabled = hapticsEnabled,
+                            accent = LuminousViolet,
+                            modifier = Modifier.testTag("keyboard_pull_clip_btn")
+                        ) { onPullClipboard() }
                         KeyCapChip("Esc", hapticsEnabled) { onSendKey(HidKeyCodes.KEY_ESC, 0) }
                         KeyCapChip("Tab", hapticsEnabled) { onSendKey(HidKeyCodes.KEY_TAB, 0) }
                         KeyCapChip("Del", hapticsEnabled) { onSendKey(HidKeyCodes.KEY_DELETE, 0) }
@@ -786,11 +860,12 @@ private fun KeyCapChip(
     label: String,
     hapticsEnabled: Boolean,
     accent: Color = ElectricBlue,
+    modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
     val haptics = LocalHapticFeedback.current
     Box(
-        modifier = Modifier
+        modifier = modifier
             .defaultMinSize(minHeight = 42.dp)
             .clip(RoundedCornerShape(12.dp))
             .background(accent.copy(alpha = 0.16f))

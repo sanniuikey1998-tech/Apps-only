@@ -60,6 +60,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.example.domain.hid.WindowsShortcut
 import com.example.domain.model.HidConnectionPhase
+import com.example.domain.model.WifiConnectionPhase
 import com.example.ui.theme.AmberWarning
 import com.example.ui.theme.CyanIce
 import com.example.ui.theme.ElectricBlue
@@ -194,20 +195,30 @@ fun GlassActionTile(
 @Composable
 fun ConnectionStatusBadge(
     phase: HidConnectionPhase,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiPhase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED
 ) {
-    val (label, color) = when (phase) {
-        HidConnectionPhase.CONNECTED -> "CONNECTED" to EmeraldConnected
-        HidConnectionPhase.CONNECTING -> "CONNECTING" to AmberWarning
-        HidConnectionPhase.REGISTERING_HID -> "INIT HID" to CyanIce
-        HidConnectionPhase.READY_TO_PAIR -> "HID READY" to ElectricBlueBright
-        HidConnectionPhase.BLUETOOTH_OFF -> "BT OFF" to RoseAlert
-        HidConnectionPhase.MISSING_PERMISSIONS -> "PERMISSIONS" to AmberWarning
-        HidConnectionPhase.HID_UNSUPPORTED -> "UNSUPPORTED" to RoseAlert
-        HidConnectionPhase.ERROR -> "ERROR" to RoseAlert
+    val (label, color) = when {
+        phase == HidConnectionPhase.CONNECTED -> "BT HID" to EmeraldConnected
+        wifiPhase == WifiConnectionPhase.CONNECTED -> "WIFI LIVE" to CyanIce
+        wifiPhase == WifiConnectionPhase.LISTENING -> "HOTSPOT WAIT" to CyanIce
+        wifiPhase == WifiConnectionPhase.CONNECTING || wifiPhase == WifiConnectionPhase.AUTHENTICATING ->
+            "WIFI AUTH" to AmberWarning
+        phase == HidConnectionPhase.CONNECTING -> "CONNECTING" to AmberWarning
+        phase == HidConnectionPhase.REGISTERING_HID -> "INIT HID" to CyanIce
+        phase == HidConnectionPhase.READY_TO_PAIR -> "HID READY" to ElectricBlueBright
+        phase == HidConnectionPhase.BLUETOOTH_OFF -> "BT OFF" to RoseAlert
+        phase == HidConnectionPhase.MISSING_PERMISSIONS -> "PERMISSIONS" to AmberWarning
+        phase == HidConnectionPhase.HID_UNSUPPORTED -> "UNSUPPORTED" to RoseAlert
+        else -> "ERROR" to RoseAlert
     }
 
-    val shouldPulse = phase == HidConnectionPhase.CONNECTED || phase == HidConnectionPhase.CONNECTING
+    val shouldPulse = phase == HidConnectionPhase.CONNECTED ||
+        phase == HidConnectionPhase.CONNECTING ||
+        wifiPhase == WifiConnectionPhase.CONNECTED ||
+        wifiPhase == WifiConnectionPhase.LISTENING ||
+        wifiPhase == WifiConnectionPhase.CONNECTING ||
+        wifiPhase == WifiConnectionPhase.AUTHENTICATING
     val pulseAlpha = if (shouldPulse) {
         val infiniteTransition = rememberInfiniteTransition(label = "pulse")
         val animated by infiniteTransition.animateFloat(

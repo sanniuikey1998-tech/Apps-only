@@ -1,13 +1,18 @@
 package com.example
 
+import com.example.data.AirMouseSensorController
 import com.example.data.BluetoothHidController
+import com.example.data.PowerShellScriptHttpServer
 import com.example.data.PreferencesRepository
 import com.example.data.WifiDiscoveryRepository
+import com.example.data.WifiRemoteClient
 import com.example.domain.hid.CustomShortcut
 import com.example.domain.hid.HidKeyCodes
 import com.example.domain.hid.HidReportDescriptor
+import com.example.domain.hid.MacroDeckProfile
 import com.example.domain.hid.TouchpadMath
 import com.example.domain.hid.WindowsShortcutsCatalog
+import com.example.domain.hid.WindowsVirtualKeyMapper
 import com.example.domain.model.PairedPcDevice
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
@@ -255,5 +260,161 @@ class HidProtocolTest {
         )
 
         assertEquals(listOf(aclActiveLaptop.address, lastPc.address), candidates.map { it.address })
+    }
+
+    @Test
+    fun `windows virtual key mapper converts HID keys, modifiers, and media keys accurately`() {
+        assertEquals(0x44, WindowsVirtualKeyMapper.hidUsageToVk(HidKeyCodes.KEY_D))
+        assertEquals(0x74, WindowsVirtualKeyMapper.hidUsageToVk(HidKeyCodes.KEY_F5))
+        assertEquals(0x2E, WindowsVirtualKeyMapper.hidUsageToVk(HidKeyCodes.KEY_DELETE))
+        assertTrue(WindowsVirtualKeyMapper.isExtendedVk(0x5B))
+        assertEquals("K|91|68", WindowsVirtualKeyMapper.formatKeyCommand(HidKeyCodes.MOD_LEFT_GUI, HidKeyCodes.KEY_D))
+        assertEquals("C|179", WindowsVirtualKeyMapper.formatConsumerCommand(HidKeyCodes.CONSUMER_PLAY_PAUSE))
+        assertEquals("M|1|12|-8|2|0", WindowsVirtualKeyMapper.formatMouseCommand(HidKeyCodes.MOUSE_LEFT, 12, -8, 2, 0))
+        assertEquals("U|SGk=", WindowsVirtualKeyMapper.formatUnicodeTextCommand("Hi"))
+    }
+
+    @Test
+    fun `powershell receiver script embeds configured port, PIN, and private LAN guard`() {
+        val script = WindowsVirtualKeyMapper.buildPowerShellReceiverScript(port = 59001, pin = "739104")
+        assertTrue(script.contains("\$Port = 59001"))
+        assertTrue(script.contains("\$Pin = \"739104\""))
+        assertTrue(script.contains("SendInput"))
+        assertTrue(script.contains("Test-PrivateIp"))
+        assertTrue(script.contains("AUTH|\$Pin"))
+    }
+
+    @Test
+    fun `powershell hotspot script connects outbound to phone gateway with PIN handshake`() {
+        val script = WindowsVirtualKeyMapper.buildPowerShellHotspotClientScript(
+            port = 58732,
+            pin = "482910",
+            phoneIpHint = "192.168.43.1"
+        )
+        assertTrue(script.contains("\$Port = 58732"))
+        assertTrue(script.contains("\$Pin = \"482910\""))
+        assertTrue(script.contains("\$PhoneIp = \"192.168.43.1\""))
+        assertTrue(script.contains("IPv4DefaultGateway"))
+        assertTrue(script.contains("HELLO|\$Pin|\$env:COMPUTERNAME"))
+        assertTrue(script.contains("SendInput"))
+    }
+
+    @Test
+    fun `selectHotspotIpv4 prioritizes hotspot ap interfaces and ignores cellular or vpn tunnels`() {
+        val selected = WifiDiscoveryRepository.selectHotspotIpv4(
+            listOf(
+                "rmnet_data0" to "10.120.4.55",
+                "tun0" to "10.8.0.2",
+                "wlan0" to "192.168.1.24",
+                "ap0" to "192.168.43.1"
+            )
+        )
+        assertEquals("192.168.43.1", selected)
+
+        val cellularOnly = WifiDiscoveryRepository.selectHotspotIpv4(
+            listOf(
+                "rmnet_data1" to "10.99.1.2",
+                "lo" to "127.0.0.1"
+            )
+        )
+        assertEquals(null, cellularOnly)
+    }
+
+    @Test
+    fun `one-line powershell command formats host ip and port accurately`() {
+        val cmd = PowerShellScriptHttpServer.formatOneLiner("192.168.43.1", 58733)
+        assertEquals("irm http://192.168.43.1:58733 | iex", cmd)
+    }
+
+    @Test
+    fun `air mouse gyro mapping applies deadzone and scales angular velocity`() {
+        val (zeroDx, zeroDy) = AirMouseSensorController.mapGyroToCursorDelta(
+            pitchRadPerSec = 0.01f,
+            yawRadPerSec = -0.02f,
+            rollRadPerSec = 0.01f,
+            dtSec = 0.02f,
+            sensitivity = 1.5f
+        )
+        assertEquals(0f, zeroDx, 0.0001f)
+        assertEquals(0f, zeroDy, 0.0001f)
+
+        val (moveDx, moveDy) = AirMouseSensorController.mapGyroToCursorDelta(
+            pitchRadPerSec = 1.0f,
+            yawRadPerSec = -1.0f,
+            rollRadPerSec = 0f,
+            dtSec = 0.02f,
+            sensitivity = 1.0f
+        )
+        assertTrue(moveDx > 0f)
+        assertTrue(moveDy < 0f)
+    }
+
+    @Test
+    fun `clipboard sync and file drop protocol commands encode and decode utf8 round-trip`() {
+        val sample = "DeckLink Clipboard ✓"
+        val clipCmd = WindowsVirtualKeyMapper.formatClipboardSetCommand(sample)
+        assertTrue(clipCmd.startsWith("CLIP_SET|"))
+        val decoded = WindowsVirtualKeyMapper.decodeBase64ToUtf8(clipCmd.removePrefix("CLIP_SET|"))
+        assertEquals(sample, decoded)
+        assertEquals("CLIP_GET", WindowsVirtualKeyMapper.formatClipboardGetCommand())
+
+        val startCmd = WindowsVirtualKeyMapper.formatFileStartCommand("photo.jpg", 12345)
+        assertTrue(startCmd.startsWith("FILE_START|"))
+        assertTrue(startCmd.endsWith("|12345"))
+        val chunkCmd = WindowsVirtualKeyMapper.formatFileChunkCommand(byteArrayOf(1, 2, 3, 4), 0, 4)
+        assertEquals("FILE_CHUNK|AQIDBA==", chunkCmd)
+        assertEquals("FILE_END", WindowsVirtualKeyMapper.formatFileEndCommand())
+
+        val script = WindowsVirtualKeyMapper.buildPowerShellHotspotClientScript(58732, "123456", "192.168.43.1")
+        assertTrue(script.contains("Set-Clipboard"))
+        assertTrue(script.contains("Get-Clipboard"))
+        assertTrue(script.contains("FILE_START"))
+        assertTrue(script.contains("FILE_END"))
+    }
+
+    @Test
+    fun `app macro decks, multi-step macros, and custom macroText serialization work cleanly`() {
+        assertTrue(WindowsShortcutsCatalog.appProfileDecks[MacroDeckProfile.BROWSER]?.isNotEmpty() == true)
+        assertTrue(WindowsShortcutsCatalog.appProfileDecks[MacroDeckProfile.DEV_IDE]?.isNotEmpty() == true)
+        assertTrue(WindowsShortcutsCatalog.appProfileDecks[MacroDeckProfile.STREAMING]?.isNotEmpty() == true)
+        assertTrue(WindowsShortcutsCatalog.appProfileDecks[MacroDeckProfile.POWERPOINT]?.isNotEmpty() == true)
+        assertTrue(WindowsShortcutsCatalog.builtInMultiStepMacros.isNotEmpty())
+
+        val customWithMacro = listOf(
+            CustomShortcut(
+                id = "m1",
+                title = "Open Terminal",
+                comboLabel = "Win + R",
+                modifierMask = HidKeyCodes.MOD_LEFT_GUI,
+                keyCode = HidKeyCodes.KEY_R,
+                macroText = "wt"
+            )
+        )
+        val encoded = PreferencesRepository.encodeCustomShortcuts(customWithMacro)
+        val decoded = PreferencesRepository.decodeCustomShortcuts(encoded)
+        assertEquals(customWithMacro, decoded)
+    }
+
+    @Test
+    fun `hotspot handshake strips UTF-8 BOM and PowerShell scripts disable BOM on TCP streams`() {
+        assertEquals(
+            "HP-PROBOOK",
+            WifiRemoteClient.parseHotspotHello("\uFEFFHELLO|523201|HP-PROBOOK\r", "523201")
+        )
+        assertEquals(
+            "HP-PROBOOK",
+            WifiRemoteClient.parseHotspotHello("HELLO|523201|HP-PROBOOK", "523201")
+        )
+        assertEquals(
+            null,
+            WifiRemoteClient.parseHotspotHello("\uFEFFHELLO|999999|HP-PROBOOK", "523201")
+        )
+
+        val hotspotScript = WindowsVirtualKeyMapper.buildPowerShellHotspotClientScript(58732, "523201", "10.17.237.107")
+        val lanScript = WindowsVirtualKeyMapper.buildPowerShellReceiverScript(58732, "523201")
+        assertTrue(hotspotScript.contains("[System.Text.UTF8Encoding]::new(\$false)"))
+        assertTrue(lanScript.contains("[System.Text.UTF8Encoding]::new(\$false)"))
+        assertFalse(hotspotScript.contains("StreamWriter]::new(\$stream, [System.Text.Encoding]::UTF8)"))
+        assertFalse(lanScript.contains("StreamWriter]::new(\$stream, [System.Text.Encoding]::UTF8)"))
     }
 }

@@ -26,6 +26,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteOutline
@@ -59,10 +60,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.hid.CustomShortcut
 import com.example.domain.hid.HidKeyCodes
+import com.example.domain.hid.MacroDeckProfile
+import com.example.domain.hid.MultiStepMacro
 import com.example.domain.hid.ShortcutCategory
 import com.example.domain.hid.WindowsShortcut
 import com.example.domain.hid.WindowsShortcutsCatalog
 import com.example.domain.model.HidStatusState
+import com.example.domain.model.WifiConnectionPhase
 import com.example.ui.components.ConnectionStatusBadge
 import com.example.ui.components.GlassActionTile
 import com.example.ui.components.GlassPanel
@@ -87,22 +91,29 @@ fun ShortcutsScreen(
     hapticsEnabled: Boolean,
     onTriggerShortcut: (WindowsShortcut) -> Unit,
     onTriggerCustomShortcut: (CustomShortcut) -> Unit,
-    onAddCustomShortcut: (String, Int, Int, String) -> Unit,
+    onAddCustomShortcut: (String, Int, Int, String, String?) -> Unit,
     onDeleteCustomShortcut: (String) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    wifiRemotePhase: WifiConnectionPhase = WifiConnectionPhase.DISCONNECTED,
+    onTriggerMultiStepMacro: (MultiStepMacro) -> Unit = {}
 ) {
+    var selectedProfile by remember { mutableStateOf(MacroDeckProfile.WINDOWS) }
     var selectedCategory by remember { mutableStateOf("ALL") }
     var showCreatorPanel by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    val builtIn = remember(selectedCategory) {
-        when (selectedCategory) {
-            "SYSTEM" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.SYSTEM }
-            "NAV" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.NAVIGATION }
-            "EDIT" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.EDITING }
-            "CUSTOM" -> emptyList()
-            else -> WindowsShortcutsCatalog.builtInShortcuts
+    val builtIn = remember(selectedProfile, selectedCategory) {
+        if (selectedProfile != MacroDeckProfile.WINDOWS) {
+            WindowsShortcutsCatalog.appProfileDecks[selectedProfile].orEmpty()
+        } else {
+            when (selectedCategory) {
+                "SYSTEM" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.SYSTEM }
+                "NAV" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.NAVIGATION }
+                "EDIT" -> WindowsShortcutsCatalog.builtInShortcuts.filter { it.category == ShortcutCategory.EDITING }
+                "CUSTOM" -> emptyList()
+                else -> WindowsShortcutsCatalog.builtInShortcuts
+            }
         }
     }
 
@@ -137,7 +148,7 @@ fun ShortcutsScreen(
                             color = TextSecondary
                         )
                     }
-                    ConnectionStatusBadge(phase = hidStatus.phase)
+                    ConnectionStatusBadge(phase = hidStatus.phase, wifiPhase = wifiRemotePhase)
                 }
             }
 
@@ -145,39 +156,62 @@ fun ShortcutsScreen(
                 AnimatedVisibility(visible = showCreatorPanel) {
                     CustomShortcutCreatorPanel(
                         onDismiss = { showCreatorPanel = false },
-                        onSave = { title, modMask, keyCode, combo ->
-                            onAddCustomShortcut(title, modMask, keyCode, combo)
+                        onSave = { title, modMask, keyCode, combo, macroText ->
+                            onAddCustomShortcut(title, modMask, keyCode, combo, macroText)
                             showCreatorPanel = false
                         }
                     )
                 }
             }
 
+            // App-Specific Macro Deck Selector
             item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    val filters = listOf(
-                        "ALL" to "All",
-                        "SYSTEM" to "System",
-                        "NAV" to "Windows Nav",
-                        "EDIT" to "Clipboard & Edit",
-                        "CUSTOM" to "Custom (${customShortcuts.size})"
-                    )
-                    filters.forEach { (key, label) ->
+                    items(MacroDeckProfile.entries) { profile ->
                         FilterChip(
-                            selected = selectedCategory == key,
-                            onClick = { selectedCategory = key },
-                            label = { Text(label, maxLines = 1) },
+                            selected = selectedProfile == profile,
+                            onClick = { selectedProfile = profile },
+                            label = { Text(profile.label, maxLines = 1) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = ElectricBlue.copy(alpha = 0.25f),
-                                selectedLabelColor = ElectricBlueBright
+                                selectedContainerColor = LuminousViolet.copy(alpha = 0.28f),
+                                selectedLabelColor = LuminousVioletBright
                             ),
-                            modifier = Modifier.testTag("filter_chip_$key")
+                            modifier = Modifier.testTag("macro_profile_${profile.name}")
                         )
+                    }
+                }
+            }
+
+            if (selectedProfile == MacroDeckProfile.WINDOWS) {
+                item {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val filters = listOf(
+                            "ALL" to "All",
+                            "SYSTEM" to "System",
+                            "NAV" to "Windows Nav",
+                            "EDIT" to "Clipboard & Edit",
+                            "CUSTOM" to "Custom (${customShortcuts.size})"
+                        )
+                        filters.forEach { (key, label) ->
+                            FilterChip(
+                                selected = selectedCategory == key,
+                                onClick = { selectedCategory = key },
+                                label = { Text(label, maxLines = 1) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = ElectricBlue.copy(alpha = 0.25f),
+                                    selectedLabelColor = ElectricBlueBright
+                                ),
+                                modifier = Modifier.testTag("filter_chip_$key")
+                            )
+                        }
                     }
                 }
             }
@@ -258,6 +292,69 @@ fun ShortcutsScreen(
                 }
             }
 
+            if (selectedProfile == MacroDeckProfile.WINDOWS && selectedCategory == "ALL") {
+                item {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    SectionHeader(
+                        title = "Multi-Step Quick Macros",
+                        subtitle = "Chained Windows sequences executed with one tap"
+                    )
+                }
+                items(WindowsShortcutsCatalog.builtInMultiStepMacros, key = { it.id }) { macro ->
+                    GlassActionTile(
+                        onClick = { onTriggerMultiStepMacro(macro) },
+                        hapticsEnabled = hapticsEnabled,
+                        accentColor = LuminousViolet,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("multi_macro_${macro.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = LuminousVioletBright
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column {
+                                    Text(
+                                        text = macro.title,
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = macro.subtitle,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = TextSecondary
+                                    )
+                                }
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(LuminousViolet.copy(alpha = 0.2f))
+                                    .border(1.dp, LuminousViolet.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = macro.badge,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = LuminousVioletBright
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
             if (selectedCategory == "ALL" || selectedCategory == "CUSTOM") {
                 item {
                     Spacer(modifier = Modifier.height(4.dp))
@@ -317,9 +414,16 @@ fun ShortcutsScreen(
                                             style = MaterialTheme.typography.titleMedium,
                                             color = TextPrimary
                                         )
-                                        if (custom.title != custom.comboLabel) {
+                                        val subLabel = buildString {
+                                            if (custom.title != custom.comboLabel) append(custom.comboLabel)
+                                            if (!custom.macroText.isNullOrBlank()) {
+                                                if (isNotEmpty()) append(" → ")
+                                                append(custom.macroText)
+                                            }
+                                        }
+                                        if (subLabel.isNotEmpty()) {
                                             Text(
-                                                text = custom.comboLabel,
+                                                text = subLabel,
                                                 style = MaterialTheme.typography.labelMedium,
                                                 color = EmeraldConnected
                                             )
@@ -368,9 +472,10 @@ fun ShortcutsScreen(
 @Composable
 private fun CustomShortcutCreatorPanel(
     onDismiss: () -> Unit,
-    onSave: (String, Int, Int, String) -> Unit
+    onSave: (String, Int, Int, String, String?) -> Unit
 ) {
     var title by remember { mutableStateOf("") }
+    var macroText by remember { mutableStateOf("") }
     var useCtrl by remember { mutableStateOf(true) }
     var useShift by remember { mutableStateOf(false) }
     var useAlt by remember { mutableStateOf(false) }
@@ -463,6 +568,18 @@ private fun CustomShortcutCreatorPanel(
         }
 
         Spacer(modifier = Modifier.height(10.dp))
+        OutlinedTextField(
+            value = macroText,
+            onValueChange = { macroText = it },
+            label = { Text("Then Type & Press Enter (Optional Macro)") },
+            placeholder = { Text("e.g. wt, notepad, or https://...") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("custom_macro_text_input")
+        )
+
+        Spacer(modifier = Modifier.height(10.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -487,7 +604,15 @@ private fun CustomShortcutCreatorPanel(
                     Text("Cancel", color = TextSecondary)
                 }
                 Button(
-                    onClick = { onSave(title, modMask, chosenKey.second, comboPreview) },
+                    onClick = {
+                        onSave(
+                            title,
+                            modMask,
+                            chosenKey.second,
+                            comboPreview,
+                            macroText.trim().ifEmpty { null }
+                        )
+                    },
                     colors = ButtonDefaults.buttonColors(containerColor = ElectricBlue),
                     modifier = Modifier.testTag("save_custom_shortcut_button")
                 ) {

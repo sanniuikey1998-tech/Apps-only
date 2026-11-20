@@ -12,7 +12,10 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.domain.hid.CustomShortcut
 import com.example.domain.hid.FourFingerAction
+import com.example.domain.hid.WindowsVirtualKeyMapper
 import com.example.domain.model.AppPreferences
+import com.example.domain.model.RemoteTransportMode
+import com.example.domain.model.WifiConnectionDirection
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -40,6 +43,13 @@ class PreferencesRepository(private val context: Context) {
         val AUTO_CONNECT_ADDRESSES = stringSetPreferencesKey("auto_connect_addresses")
         val DISABLED_AUTO_CONNECT_ADDRESSES = stringSetPreferencesKey("disabled_auto_connect_addresses")
         val CUSTOM_SHORTCUTS = stringPreferencesKey("custom_shortcuts_v1")
+        val PREFERRED_TRANSPORT = stringPreferencesKey("preferred_transport")
+        val WIFI_DIRECTION = stringPreferencesKey("wifi_direction")
+        val WIFI_TARGET_IP = stringPreferencesKey("wifi_target_ip")
+        val WIFI_PORT = intPreferencesKey("wifi_port")
+        val WIFI_PIN = stringPreferencesKey("wifi_pin")
+        val AIR_MOUSE_SENSITIVITY = floatPreferencesKey("air_mouse_sensitivity")
+        val VOLUME_BUTTONS_CONTROL = booleanPreferencesKey("volume_buttons_control")
     }
 
     val preferencesFlow: Flow<AppPreferences> = context.deckLinkDataStore.data.map { prefs ->
@@ -62,7 +72,14 @@ class PreferencesRepository(private val context: Context) {
             lastConnectedName = prefs[Keys.LAST_NAME],
             autoConnectAddresses = prefs[Keys.AUTO_CONNECT_ADDRESSES] ?: emptySet(),
             disabledAutoConnectAddresses = prefs[Keys.DISABLED_AUTO_CONNECT_ADDRESSES] ?: emptySet(),
-            customShortcuts = decodeCustomShortcuts(prefs[Keys.CUSTOM_SHORTCUTS])
+            customShortcuts = decodeCustomShortcuts(prefs[Keys.CUSTOM_SHORTCUTS]),
+            preferredTransport = parseTransport(prefs[Keys.PREFERRED_TRANSPORT]),
+            wifiDirection = parseWifiDirection(prefs[Keys.WIFI_DIRECTION]),
+            wifiTargetIp = prefs[Keys.WIFI_TARGET_IP] ?: "",
+            wifiPort = prefs[Keys.WIFI_PORT] ?: WindowsVirtualKeyMapper.DEFAULT_WIFI_PORT,
+            wifiPin = prefs[Keys.WIFI_PIN] ?: WindowsVirtualKeyMapper.DEFAULT_WIFI_PIN,
+            airMouseSensitivity = prefs[Keys.AIR_MOUSE_SENSITIVITY] ?: 1.25f,
+            volumeButtonsControl = prefs[Keys.VOLUME_BUTTONS_CONTROL] ?: true
         )
     }
 
@@ -154,8 +171,42 @@ class PreferencesRepository(private val context: Context) {
         }
     }
 
+    suspend fun updatePreferredTransport(mode: RemoteTransportMode) {
+        context.deckLinkDataStore.edit { it[Keys.PREFERRED_TRANSPORT] = mode.name }
+    }
+
+    suspend fun updateWifiDirection(direction: WifiConnectionDirection) {
+        context.deckLinkDataStore.edit { it[Keys.WIFI_DIRECTION] = direction.name }
+    }
+
+    suspend fun updateWifiRemoteConfig(ip: String, port: Int, pin: String) {
+        context.deckLinkDataStore.edit {
+            it[Keys.WIFI_TARGET_IP] = ip.trim()
+            it[Keys.WIFI_PORT] = port.coerceIn(1024, 65535)
+            it[Keys.WIFI_PIN] = pin.filter { ch -> ch.isLetterOrDigit() }.ifBlank { WindowsVirtualKeyMapper.DEFAULT_WIFI_PIN }
+        }
+    }
+
+    suspend fun updateAirMouseSensitivity(sensitivity: Float) {
+        context.deckLinkDataStore.edit { it[Keys.AIR_MOUSE_SENSITIVITY] = sensitivity.coerceIn(0.4f, 3.0f) }
+    }
+
+    suspend fun updateVolumeButtonsControl(enabled: Boolean) {
+        context.deckLinkDataStore.edit { it[Keys.VOLUME_BUTTONS_CONTROL] = enabled }
+    }
+
     private fun parseAction(raw: String?, fallback: FourFingerAction): FourFingerAction {
         return raw?.let { runCatching { FourFingerAction.valueOf(it) }.getOrNull() } ?: fallback
+    }
+
+    private fun parseTransport(raw: String?): RemoteTransportMode {
+        return raw?.let { runCatching { RemoteTransportMode.valueOf(it) }.getOrNull() }
+            ?: RemoteTransportMode.BLUETOOTH_HID
+    }
+
+    private fun parseWifiDirection(raw: String?): WifiConnectionDirection {
+        return raw?.let { runCatching { WifiConnectionDirection.valueOf(it) }.getOrNull() }
+            ?: WifiConnectionDirection.PC_TO_PHONE_HOTSPOT
     }
 
     companion object {
@@ -163,7 +214,8 @@ class PreferencesRepository(private val context: Context) {
             return list.joinToString("\n") { s ->
                 val safeTitle = s.title.replace("|", " ").replace("\n", " ")
                 val safeCombo = s.comboLabel.replace("|", " ").replace("\n", " ")
-                "${s.id}|$safeTitle|$safeCombo|${s.modifierMask}|${s.keyCode}"
+                val safeMacro = s.macroText?.replace("|", " ")?.replace("\n", " ").orEmpty()
+                "${s.id}|$safeTitle|$safeCombo|${s.modifierMask}|${s.keyCode}|$safeMacro"
             }
         }
 
@@ -174,12 +226,14 @@ class PreferencesRepository(private val context: Context) {
                 if (parts.size < 5) return@mapNotNull null
                 val mod = parts[3].toIntOrNull() ?: return@mapNotNull null
                 val code = parts[4].toIntOrNull() ?: return@mapNotNull null
+                val macro = parts.getOrNull(5)?.takeIf { it.isNotBlank() }
                 CustomShortcut(
                     id = parts[0],
                     title = parts[1],
                     comboLabel = parts[2],
                     modifierMask = mod,
-                    keyCode = code
+                    keyCode = code,
+                    macroText = macro
                 )
             }
         }

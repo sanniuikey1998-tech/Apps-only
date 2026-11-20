@@ -1,6 +1,7 @@
 package com.example.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Row
@@ -42,6 +43,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -98,6 +101,7 @@ fun DeckLinkApp(
     viewModel: DeckLinkViewModel = viewModel()
 ) {
     val hidStatus by viewModel.hidStatus.collectAsStateWithLifecycle()
+    val wifiRemoteStatus by viewModel.wifiRemoteStatus.collectAsStateWithLifecycle()
     val pairedDevices by viewModel.pairedDevices.collectAsStateWithLifecycle()
     val discoveredBt by viewModel.discoveredBtDevices.collectAsStateWithLifecycle()
     val isBtDiscovering by viewModel.isBtDiscovering.collectAsStateWithLifecycle()
@@ -112,8 +116,14 @@ fun DeckLinkApp(
     val dragLockEnabled by viewModel.dragLockEnabled.collectAsStateWithLifecycle()
     val laserPointerActive by viewModel.laserPointerActive.collectAsStateWithLifecycle()
     val pendingShortcut by viewModel.pendingDangerousShortcut.collectAsStateWithLifecycle()
+    val scriptServerStatus by viewModel.scriptServerStatus.collectAsStateWithLifecycle()
+    val fileTransferState by viewModel.fileTransferState.collectAsStateWithLifecycle()
+    val airMouseActive by viewModel.airMouseActive.collectAsStateWithLifecycle()
+    val presentationTimer by viewModel.presentationTimer.collectAsStateWithLifecycle()
 
+    val haptics = LocalHapticFeedback.current
     var mediaInitialTab by remember { mutableIntStateOf(0) }
+    var currentMediaSubTab by remember { mutableIntStateOf(0) }
     val snackbarHostState = remember { SnackbarHostState() }
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -125,9 +135,37 @@ fun DeckLinkApp(
         viewModel.refreshPermissionsAndHid()
     }
 
+    val photoDropLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) viewModel.sendFileUriToPc(uri)
+    }
+
+    val docDropLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) viewModel.sendFileUriToPc(uri)
+    }
+
+    LaunchedEffect(currentRoute, currentMediaSubTab) {
+        viewModel.updateActiveScreenContext(
+            route = currentRoute,
+            presentationTabActive = currentRoute == DeckLinkRoutes.MEDIA && currentMediaSubTab == 1
+        )
+    }
+
     LaunchedEffect(Unit) {
         viewModel.feedback.collect { message ->
             snackbarHostState.showSnackbar(message)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.timerAlertPulse.collect { alert ->
+            if (preferences.hapticFeedback) {
+                haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            }
+            snackbarHostState.showSnackbar("Presentation Timer: $alert")
         }
     }
 
@@ -264,7 +302,21 @@ fun DeckLinkApp(
                                             "shortcuts" -> navigateTab(DeckLinkRoutes.SHORTCUTS)
                                         }
                                     },
-                                    onOpenConnectionSettings = { navigateTab(DeckLinkRoutes.SETTINGS) }
+                                    onOpenConnectionSettings = { navigateTab(DeckLinkRoutes.SETTINGS) },
+                                    wifiRemoteStatus = wifiRemoteStatus,
+                                    preferredTransport = preferences.preferredTransport,
+                                    wifiDirection = preferences.wifiDirection,
+                                    savedWifiTargetIp = preferences.wifiTargetIp,
+                                    onSelectTransport = viewModel::setPreferredTransport,
+                                    fileTransferState = fileTransferState,
+                                    onPushClipboard = viewModel::pushPhoneClipboardToPc,
+                                    onPullClipboard = viewModel::pullPcClipboardToPhone,
+                                    onPickPhotoDrop = {
+                                        photoDropLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                        )
+                                    },
+                                    onPickDocDrop = { docDropLauncher.launch(arrayOf("*/*")) }
                                 )
                             }
 
@@ -292,7 +344,14 @@ fun DeckLinkApp(
                                     onOpenPresentation = {
                                         mediaInitialTab = 1
                                         navigateTab(DeckLinkRoutes.MEDIA)
-                                    }
+                                    },
+                                    wifiRemotePhase = wifiRemoteStatus.phase,
+                                    airMouseActive = airMouseActive,
+                                    isAirMouseSupported = viewModel.isAirMouseSupported,
+                                    onToggleAirMouse = viewModel::toggleAirMouse,
+                                    onSetAirMouseHeld = viewModel::setAirMouseEnabled,
+                                    onAirMouseSensitivityChange = viewModel::setAirMouseSensitivity,
+                                    onPinchZoom = viewModel::pinchZoom
                                 )
                             }
 
@@ -308,7 +367,10 @@ fun DeckLinkApp(
                                     onSendKey = viewModel::sendKeyboardKey,
                                     onSendChar = viewModel::sendCharFromTextBar,
                                     onSendText = viewModel::sendTextString,
-                                    onTriggerCustomShortcut = viewModel::triggerCustomShortcut
+                                    onTriggerCustomShortcut = viewModel::triggerCustomShortcut,
+                                    wifiRemotePhase = wifiRemoteStatus.phase,
+                                    onPushClipboard = viewModel::pushPhoneClipboardToPc,
+                                    onPullClipboard = viewModel::pullPcClipboardToPhone
                                 )
                             }
 
@@ -322,7 +384,16 @@ fun DeckLinkApp(
                                     onPresentationAction = viewModel::sendPresentationAction,
                                     onToggleLaserPointer = viewModel::toggleLaserPointer,
                                     onMovePointer = viewModel::movePointer,
-                                    onLeftClick = { viewModel.clickMouseButton(com.example.domain.hid.HidKeyCodes.MOUSE_LEFT) }
+                                    onLeftClick = { viewModel.clickMouseButton(com.example.domain.hid.HidKeyCodes.MOUSE_LEFT) },
+                                    wifiRemotePhase = wifiRemoteStatus.phase,
+                                    presentationTimer = presentationTimer,
+                                    airMouseActive = airMouseActive,
+                                    isAirMouseSupported = viewModel.isAirMouseSupported,
+                                    onToggleAirMouse = viewModel::toggleAirMouse,
+                                    onToggleTimer = viewModel::togglePresentationTimer,
+                                    onResetTimer = viewModel::resetPresentationTimer,
+                                    onSetTimerMinutes = viewModel::setPresentationTimerMinutes,
+                                    onSelectedTabChanged = { tab -> currentMediaSubTab = tab }
                                 )
                             }
 
@@ -334,7 +405,9 @@ fun DeckLinkApp(
                                     onTriggerShortcut = viewModel::triggerWindowsShortcut,
                                     onTriggerCustomShortcut = viewModel::triggerCustomShortcut,
                                     onAddCustomShortcut = viewModel::addCustomShortcut,
-                                    onDeleteCustomShortcut = viewModel::deleteCustomShortcut
+                                    onDeleteCustomShortcut = viewModel::deleteCustomShortcut,
+                                    wifiRemotePhase = wifiRemoteStatus.phase,
+                                    onTriggerMultiStepMacro = viewModel::triggerMultiStepMacro
                                 )
                             }
 
@@ -370,7 +443,25 @@ fun DeckLinkApp(
                                     onTimeoutChange = viewModel::setConnectionTimeout,
                                     onForegroundServiceChange = viewModel::setForegroundServiceEnabled,
                                     onConfirmDangerousChange = viewModel::setConfirmDangerousShortcuts,
-                                    onFourFingerGestureChange = viewModel::setFourFingerGesture
+                                    onFourFingerGestureChange = viewModel::setFourFingerGesture,
+                                    wifiRemoteStatus = wifiRemoteStatus,
+                                    onStartWifiHotspotListener = viewModel::startWifiHotspotListener,
+                                    onConnectWifiRemote = viewModel::connectWifiRemote,
+                                    onDisconnectWifiRemote = viewModel::disconnectWifiRemote,
+                                    onSelectWifiDirection = viewModel::setWifiDirection,
+                                    onRegenerateWifiPin = viewModel::regenerateWifiPin,
+                                    scriptServerStatus = scriptServerStatus,
+                                    fileTransferState = fileTransferState,
+                                    onStartOneLineServer = viewModel::startOneLineScriptServer,
+                                    onStopOneLineServer = viewModel::stopOneLineScriptServer,
+                                    onPickPhotoDrop = {
+                                        photoDropLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                                        )
+                                    },
+                                    onPickDocDrop = { docDropLauncher.launch(arrayOf("*/*")) },
+                                    onAirMouseSensitivityChange = viewModel::setAirMouseSensitivity,
+                                    onVolumeButtonsControlChange = viewModel::setVolumeButtonsControl
                                 )
                             }
                         }

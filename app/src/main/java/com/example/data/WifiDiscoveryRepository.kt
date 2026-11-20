@@ -1,6 +1,9 @@
 package com.example.data
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
@@ -11,6 +14,8 @@ import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
 import android.os.Build
+import androidx.core.content.ContextCompat
+import com.example.domain.hid.WindowsVirtualKeyMapper
 import com.example.domain.model.DiscoveredWifiPc
 import com.example.domain.model.WifiStatusInfo
 import kotlinx.coroutines.CoroutineScope
@@ -24,6 +29,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -33,6 +39,7 @@ import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.Socket
 import java.util.concurrent.ConcurrentHashMap
 
@@ -64,32 +71,41 @@ class WifiDiscoveryRepository(private val context: Context) {
             val activeNetwork = connectivityManager.activeNetwork
             val caps = activeNetwork?.let { connectivityManager.getNetworkCapabilities(it) }
             val hasWifi = caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
-            if (!hasWifi) {
-                return WifiStatusInfo(isWifiConnected = false)
-            }
-            val linkProps: LinkProperties? = connectivityManager.getLinkProperties(activeNetwork)
-            val ipv4 = linkProps?.linkAddresses
-                ?.mapNotNull { it.address as? Inet4Address }
-                ?.firstOrNull { !it.isLoopbackAddress && isPrivateLanIpv4(it) }
-                ?.hostAddress
 
-            val prefix = ipv4?.substringBeforeLast('.')
-            val wifiInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                caps.transportInfo as? WifiInfo
-            } else {
-                @Suppress("DEPRECATION")
-                wifiManager?.connectionInfo
-            }
+            val wifiIpv4 = if (hasWifi) {
+                val linkProps: LinkProperties? = connectivityManager.getLinkProperties(activeNetwork)
+                linkProps?.linkAddresses
+                    ?.mapNotNull { it.address as? Inet4Address }
+                    ?.firstOrNull { !it.isLoopbackAddress && isPrivateLanIpv4(it) }
+                    ?.hostAddress
+            } else null
+
+            val wifiPrefix = wifiIpv4?.substringBeforeLast('.')
+            val wifiInfo = if (hasWifi) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    caps?.transportInfo as? WifiInfo
+                } else {
+                    @Suppress("DEPRECATION")
+                    wifiManager?.connectionInfo
+                }
+            } else null
+
             val rawSsid = wifiInfo?.ssid?.trim('"')
             val cleanSsid = rawSsid?.takeIf { it.isNotBlank() && it != "<unknown ssid>" }
             val linkSpeed = wifiInfo?.linkSpeed?.takeIf { it > 0 }
 
+            val hotspotIp = detectHotspotIpv4(excludeWifiIp = wifiIpv4)
+            val hotspotPrefix = hotspotIp?.substringBeforeLast('.')
+
             return WifiStatusInfo(
-                isWifiConnected = true,
-                ssid = cleanSsid ?: "Wi-Fi LAN Connected",
-                localIpv4 = ipv4,
-                subnetPrefix = prefix,
-                linkSpeedMbps = linkSpeed
+                isWifiConnected = hasWifi,
+                ssid = if (hasWifi) (cleanSsid ?: "Wi-Fi LAN Connected") else null,
+                localIpv4 = wifiIpv4,
+                subnetPrefix = wifiPrefix,
+                linkSpeedMbps = linkSpeed,
+                isHotspotActive = hotspotIp != null,
+                hotspotIpv4 = hotspotIp,
+                hotspotSubnetPrefix = hotspotPrefix
             )
         }
 
@@ -113,17 +129,63 @@ class WifiDiscoveryRepository(private val context: Context) {
             }
         }
 
+        val apReceiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                trySend(readCurrentWifi())
+            }
+        }
+
         val request = NetworkRequest.Builder()
             .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
             .build()
         runCatching { connectivityManager.registerNetworkCallback(request, callback) }
+        runCatching {
+            ContextCompat.registerReceiver(
+                context,
+                apReceiver,
+                IntentFilter("android.net.wifi.WIFI_AP_STATE_CHANGED"),
+                ContextCompat.RECEIVER_EXPORTED
+            )
+        }
+
+        val pollJob = launch(Dispatchers.IO) {
+            while (isActive) {
+                delay(4000L)
+                trySend(readCurrentWifi())
+            }
+        }
 
         awaitClose {
+            pollJob.cancel()
             runCatching { connectivityManager.unregisterNetworkCallback(callback) }
+            runCatching { context.unregisterReceiver(apReceiver) }
         }
     }
 
-    suspend fun scanLocalNetworkForWindowsPcs(localIpv4: String?): List<DiscoveredWifiPc> =
+    private fun detectHotspotIpv4(excludeWifiIp: String?): String? {
+        val candidates = mutableListOf<Pair<String, String>>()
+        runCatching {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@runCatching
+            for (iface in interfaces) {
+                if (!iface.isUp || iface.isLoopback || iface.isVirtual) continue
+                val ifaceName = iface.name.orEmpty()
+                for (addr in iface.inetAddresses) {
+                    if (addr is Inet4Address && !addr.isLoopbackAddress && isPrivateLanIpv4(addr)) {
+                        val hostIp = addr.hostAddress ?: continue
+                        if (hostIp != excludeWifiIp) {
+                            candidates.add(ifaceName to hostIp)
+                        }
+                    }
+                }
+            }
+        }
+        return selectHotspotIpv4(candidates)
+    }
+
+    suspend fun scanLocalNetworkForWindowsPcs(
+        localIpv4: String?,
+        extraReceiverPort: Int = WindowsVirtualKeyMapper.DEFAULT_WIFI_PORT
+    ): List<DiscoveredWifiPc> =
         withContext(Dispatchers.IO) {
             if (localIpv4.isNullOrBlank()) return@withContext emptyList()
             val localInet = runCatching { InetAddress.getByName(localIpv4) }.getOrNull()
@@ -137,9 +199,11 @@ class WifiDiscoveryRepository(private val context: Context) {
             var multicastLock: WifiManager.MulticastLock? = null
 
             try {
-                multicastLock = wifiManager?.createMulticastLock("DeckLinkLanScan")?.apply {
-                    setReferenceCounted(false)
-                    acquire()
+                runCatching {
+                    multicastLock = wifiManager?.createMulticastLock("DeckLinkLanScan")?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
                 }
 
                 // 1. Android NsdManager mDNS discovery for Windows/Workstation/SMB/RDP services
@@ -157,7 +221,7 @@ class WifiDiscoveryRepository(private val context: Context) {
                     probeWsDiscovery(foundMap)
                 }
 
-                // 3. Bounded parallel TCP check for Windows built-in ports (445 SMB, 3389 RDP, 5985 WinRM)
+                // 3. Bounded parallel TCP check for Windows built-in ports + DeckLink receiver port
                 val subnet = localIpv4.substringBeforeLast('.')
                 val semaphore = Semaphore(32)
                 val scanJobs = (1..254).mapNotNull { host ->
@@ -165,7 +229,7 @@ class WifiDiscoveryRepository(private val context: Context) {
                     if (targetIp == localIpv4) return@mapNotNull null
                     async {
                         semaphore.withPermit {
-                            val openPorts = probeWindowsBuiltInPorts(targetIp)
+                            val openPorts = probeWindowsBuiltInPorts(targetIp, extraReceiverPort)
                             if (openPorts.isNotEmpty()) {
                                 val resolvedName = runCatching {
                                     InetAddress.getByName(targetIp).canonicalHostName
@@ -306,8 +370,8 @@ class WifiDiscoveryRepository(private val context: Context) {
         }
     }
 
-    private fun probeWindowsBuiltInPorts(ip: String): List<Int> {
-        val candidatePorts = listOf(445, 3389, 5985)
+    private fun probeWindowsBuiltInPorts(ip: String, extraPort: Int): List<Int> {
+        val candidatePorts = listOf(extraPort, 445, 3389, 5985).distinct()
         val open = mutableListOf<Int>()
         for (port in candidatePorts) {
             runCatching {
@@ -353,6 +417,24 @@ class WifiDiscoveryRepository(private val context: Context) {
         }
 
     companion object {
+        private val excludedPrefixes = listOf("rmnet", "ccmni", "pdp", "clat", "tun", "ppp", "dummy", "lo", "v4-")
+        private val preferredHotspotPrefixes = listOf("ap", "swlan", "softap", "wlan", "wifi", "rndis", "tether")
+
+        fun selectHotspotIpv4(candidates: List<Pair<String, String>>): String? {
+            val filtered = candidates.filter { (name, _) ->
+                val lower = name.lowercase()
+                excludedPrefixes.none { lower.startsWith(it) }
+            }
+            if (filtered.isEmpty()) return null
+            for (prefix in preferredHotspotPrefixes) {
+                val match = filtered.firstOrNull { (name, _) ->
+                    name.lowercase().startsWith(prefix)
+                }
+                if (match != null) return match.second
+            }
+            return null
+        }
+
         fun isPrivateLanIpv4(address: Inet4Address): Boolean {
             if (address.isSiteLocalAddress) return true
             val b = address.address
